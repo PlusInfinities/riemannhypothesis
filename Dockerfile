@@ -5,6 +5,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY riemann_zeta_plotly.py .
+COPY riemann_zeta_plotly.py riemann_zeta_plotly_2d.py ./
 
-CMD ["python", "riemann_zeta_plotly.py"]
+CMD ["sh", "-c", "python riemann_zeta_plotly.py && python riemann_zeta_plotly_2d.py"]
