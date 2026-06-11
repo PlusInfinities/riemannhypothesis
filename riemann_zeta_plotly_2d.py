@@ -17,6 +17,20 @@ import numpy as np
 import plotly.graph_objects as go
 
 
+# Imaginary parts of the first known nontrivial zeros zeta(1/2 + i*t) = 0
+# (positive t; conjugates -t are also zeros by the reflection formula).
+NONTRIVIAL_ZERO_ORDINATES = [
+    14.134725141734693,
+    21.022039638771554,
+    25.010857580145688,
+    30.424876125859513,
+    32.935061587739189,
+    37.586178158825671,
+    40.918719012147495,
+    43.327073280914999,
+]
+
+
 def zeta_hasse(s, n_terms=40):
     """zeta(s) for any complex s != 1, via Hasse's globally convergent series:
     zeta(s) = 1/(1 - 2^(1-s)) * sum_{n=0}^N 2^-(n+1) * sum_{k=0}^n (-1)^k C(n,k) (k+1)^-s
@@ -50,71 +64,202 @@ def transform_line(x, y, threshold):
     return np.where(far, np.nan, w.real), np.where(far, np.nan, w.imag)
 
 
-def build_grid_lines(extent=3.0, n_lines=21, n_points=200, threshold=9.0):
-    """Build identity (X0, Y0) and zeta-image (X1, Y1) coordinates for a grid of lines."""
-    coords = np.linspace(-extent, extent, n_lines)
-    fine = np.linspace(-extent, extent, n_points)
+def _im_sample_points(im_extent, inner_extent=5.0, n_inner=300, n_outer=250):
+    """Sample points over [-im_extent, im_extent], dense near 0 (where vertical
+    lines close to Re(s) = 1 vary rapidly near the pole at s = 1) and coarser
+    further out (where zeta varies slowly), keeping the point count manageable
+    even when im_extent is large."""
+    inner_extent = min(inner_extent, im_extent)
+    inner = np.linspace(-inner_extent, inner_extent, n_inner)
+    if im_extent <= inner_extent:
+        return inner
+    outer_pos = np.linspace(inner_extent, im_extent, n_outer)[1:]
+    return np.concatenate([-outer_pos[::-1], inner, outer_pos])
+
+
+def line_family(fixed_axis, fixed_values, span):
+    """s-plane (x, y) coordinates for a family of straight line segments,
+    NaN-separated (one line per value in `fixed_values`).
+
+    `fixed_axis` is "re" or "im" - the coordinate held constant along each
+    line; `span` gives the sample points for the varying coordinate.
+    """
     nan = np.array([np.nan])
-
-    def build(is_vertical):
-        x0_parts, y0_parts, x1_parts, y1_parts = [], [], [], []
-        for c in coords:
-            x = np.full_like(fine, c) if is_vertical else fine
-            y = fine if is_vertical else np.full_like(fine, c)
-            wx, wy = transform_line(x, y, threshold)
-
-            x0_parts += [x, nan]
-            y0_parts += [y, nan]
-            x1_parts += [wx, nan]
-            y1_parts += [wy, nan]
-
-        return (
-            np.concatenate(x0_parts),
-            np.concatenate(y0_parts),
-            np.concatenate(x1_parts),
-            np.concatenate(y1_parts),
-        )
-
-    return build(is_vertical=True), build(is_vertical=False)
+    x_parts, y_parts = [], []
+    for c in fixed_values:
+        if fixed_axis == "re":
+            x_parts += [np.full_like(span, c), nan]
+            y_parts += [span, nan]
+        else:
+            x_parts += [span, nan]
+            y_parts += [np.full_like(span, c), nan]
+    return np.concatenate(x_parts), np.concatenate(y_parts)
 
 
-def build_critical_line(extent=3.0, n_points=200, threshold=9.0):
-    """Build identity and zeta-image coordinates for the critical line Re(s) = 1/2."""
-    fine = np.linspace(-extent, extent, n_points)
-    x = np.full_like(fine, 0.5)
-    y = fine
-    wx, wy = transform_line(x, y, threshold)
+def build_strip_boundary(re_lo, re_hi, im_extent=3.0, n_points=60, threshold=9.0, eps=0.01):
+    """Build identity and zeta-image coordinates for the rectangular boundary of
+    the vertical strip re_lo <= Re(s) <= re_hi, -im_extent <= Im(s) <= im_extent.
+
+    Used to shade the strip and show (via fill="toself") the region it is
+    mapped to under zeta. Values are clipped (rather than NaN'd) so the
+    boundary stays a closed, finite polygon even near the pole at s=1.
+    """
+    if re_hi >= 1.0:
+        re_hi -= eps  # nudge away from the pole at s = 1
+
+    re_edge = np.linspace(re_lo, re_hi, n_points)
+    im_edge = np.linspace(-im_extent, im_extent, n_points)
+
+    x = np.concatenate([re_edge, np.full(n_points, re_hi), re_edge[::-1], np.full(n_points, re_lo)])
+    y = np.concatenate([np.full(n_points, -im_extent), im_edge, np.full(n_points, im_extent), im_edge[::-1]])
+
+    w = zeta_hasse(x + 1j * y)
+    wx = np.clip(w.real, -threshold, threshold)
+    wy = np.clip(w.imag, -threshold, threshold)
     return x, y, wx, wy
 
 
-def build_figure(extent=3.0, n_lines=21, n_points=200, n_frames=30):
-    span = 2 * extent
-    threshold = 1.5 * span
+def circle_family(center, radii, n_points=200):
+    """s-plane (x, y) coordinates for a family of concentric circles
+    |s - center| = r, one per radius in `radii`, NaN-separated."""
+    theta = np.linspace(0, 2 * np.pi, n_points)
+    nan = np.array([np.nan])
+    x_parts, y_parts = [], []
+    for r in radii:
+        x_parts += [center[0] + r * np.cos(theta), nan]
+        y_parts += [center[1] + r * np.sin(theta), nan]
+    return np.concatenate(x_parts), np.concatenate(y_parts)
 
-    (vX0, vY0, vX1, vY1), (hX0, hY0, hX1, hY1) = build_grid_lines(extent, n_lines, n_points, threshold)
-    cX0, cY0, cX1, cY1 = build_critical_line(extent, n_points, threshold)
+
+def build_zero_markers(im_extent=3.0):
+    """Identity (on the critical line) and image (at the origin, since zeta = 0
+    there) coordinates for the known nontrivial zeros within +/- im_extent."""
+    ordinates = [t for t in NONTRIVIAL_ZERO_ORDINATES if t <= im_extent]
+    ordinates = [-t for t in reversed(ordinates)] + ordinates
+    x0 = np.full(len(ordinates), 0.5)
+    y0 = np.array(ordinates)
+    x1 = np.zeros(len(ordinates))
+    y1 = np.zeros(len(ordinates))
+    return x0, y0, x1, y1, ordinates
+
+
+# Keys identifying the selectable entries in the curve library built by
+# build_figure(). Pass a subset of these as `selected` to choose which
+# transforming curve families are computed and shown.
+RE_LINES = "re_lines"
+IM_LINES = "im_lines"
+CIRCLES_RE0 = "circles_re0"
+CIRCLES_RE_HALF = "circles_re_half"
+CIRCLES_RE1 = "circles_re1"
+CRITICAL_LINE = "critical_line"
+
+ALL_CURVES = [RE_LINES, IM_LINES, CIRCLES_RE0, CIRCLES_RE_HALF, CIRCLES_RE1, CRITICAL_LINE]
+
+
+def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_frames=30,
+                 n_circles=30, circle_n_points=200, h_re_extent=None, selected=None):
+    """Build the figure. `selected` is a list of curve-library keys (see
+    ALL_CURVES) choosing which transforming curve families to include as
+    toggleable traces; defaults to all of them."""
+    span = im_extent
+    if h_re_extent is None:
+        h_re_extent = im_extent
+    if selected is None:
+        selected = ALL_CURVES
+
+    re_coords = np.linspace(-re_extent, re_extent, n_lines)
+    im_coords = np.linspace(-im_extent, im_extent, n_lines)
+    im_fine = _im_sample_points(im_extent)
+    h_re_fine = _im_sample_points(h_re_extent)
+
+    s0X0, s0Y0, s0X1, s0Y1 = build_strip_boundary(0.0, 0.5, im_extent, threshold=threshold)
+    s1X0, s1Y0, s1X1, s1Y1 = build_strip_boundary(0.5, 1.0, im_extent, threshold=threshold)
+    zX0, zY0, zX1, zY1, zero_ordinates = build_zero_markers(im_extent)
+    zero_text = [f"ζ(1/2 + {t:.3f}i) = 0" for t in zero_ordinates]
+
+    # Extend the concentric circle families out to |s| of the farthest
+    # displayed zero (Re(s) = 1/2, Im(s) = last ordinate), spacing them so the
+    # count per family stays fixed regardless of how far that reaches.
+    if zero_ordinates:
+        circle_max_radius = float(np.hypot(0.5, max(abs(o) for o in zero_ordinates)))
+    else:
+        circle_max_radius = re_extent
+    circle_step = circle_max_radius / n_circles
+    circle_radii = np.arange(circle_step, circle_max_radius + circle_step / 2, circle_step)
+
+    curve_library = {
+        RE_LINES: dict(
+            name="constant Re(s)", color="royalblue", width=1,
+            xy=line_family("re", re_coords, im_fine),
+        ),
+        IM_LINES: dict(
+            name="constant Im(s)", color="firebrick", width=1,
+            xy=line_family("im", im_coords, h_re_fine),
+        ),
+        CIRCLES_RE0: dict(
+            name="circles centered at Re(s) = 0", color="darkviolet", width=1,
+            xy=circle_family((0.0, 0.0), circle_radii, circle_n_points),
+        ),
+        CIRCLES_RE_HALF: dict(
+            name="circles centered at Re(s) = 1/2", color="gold", width=1,
+            xy=circle_family((0.5, 0.0), circle_radii, circle_n_points),
+        ),
+        CIRCLES_RE1: dict(
+            name="circles centered at Re(s) = 1", color="deeppink", width=1,
+            xy=circle_family((1.0, 0.0), circle_radii, circle_n_points),
+        ),
+        CRITICAL_LINE: dict(
+            name="Re(s) = 1/2 (critical line)", color="black", width=2.5, dash="dot",
+            xy=line_family("re", [0.5], im_fine),
+        ),
+    }
 
     def lerp(a, b, t):
+        if t == 0:
+            return a
         return (1 - t) * a + t * b
 
+    # Precompute s-plane and zeta-image coordinates for each selected curve.
+    curves = []
+    for key in selected:
+        spec = curve_library[key]
+        x0, y0 = spec["xy"]
+        x1, y1 = transform_line(x0, y0, threshold)
+        curves.append((spec, x0, y0, x1, y1))
+
     def traces(t):
-        return [
+        result = [
             go.Scatter(
-                x=lerp(vX0, vX1, t), y=lerp(vY0, vY1, t),
-                mode="lines", line=dict(color="royalblue", width=1),
-                name="constant Re(s)",
+                x=lerp(s0X0, s0X1, t), y=lerp(s0Y0, s0Y1, t),
+                mode="lines", line=dict(width=0),
+                fill="toself", fillcolor="rgba(255, 165, 0, 0.18)",
+                name="0 < Re(s) < 1/2",
+                hoverinfo="skip",
             ),
             go.Scatter(
-                x=lerp(hX0, hX1, t), y=lerp(hY0, hY1, t),
-                mode="lines", line=dict(color="firebrick", width=1),
-                name="constant Im(s)",
-            ),
-            go.Scatter(
-                x=lerp(cX0, cX1, t), y=lerp(cY0, cY1, t),
-                mode="lines", line=dict(color="black", width=2.5, dash="dot"),
-                name="Re(s) = 1/2 (critical line)",
+                x=lerp(s1X0, s1X1, t), y=lerp(s1Y0, s1Y1, t),
+                mode="lines", line=dict(width=0),
+                fill="toself", fillcolor="rgba(0, 153, 76, 0.18)",
+                name="1/2 < Re(s) < 1",
+                hoverinfo="skip",
             ),
         ]
+        for spec, x0, y0, x1, y1 in curves:
+            line = dict(color=spec["color"], width=spec["width"])
+            if "dash" in spec:
+                line["dash"] = spec["dash"]
+            result.append(go.Scatter(
+                x=lerp(x0, x1, t), y=lerp(y0, y1, t),
+                mode="lines", line=line,
+                name=spec["name"],
+            ))
+        result.append(go.Scatter(
+            x=lerp(zX0, zX1, t), y=lerp(zY0, zY1, t),
+            mode="markers", marker=dict(color="red", size=10, symbol="x", line=dict(width=2, color="red")),
+            name="nontrivial zeros",
+            text=zero_text, hoverinfo="text",
+        ))
+        return result
 
     frames = []
     steps = []
@@ -138,10 +283,13 @@ def build_figure(extent=3.0, n_lines=21, n_points=200, n_frames=30):
         frames=frames,
         layout=go.Layout(
             title="Riemann Zeta as a Map from C to C",
-            xaxis=dict(title="Re", range=[-span, span], zeroline=False),
-            yaxis=dict(title="Im", range=[-span, span], zeroline=False, scaleanchor="x", scaleratio=1),
+            xaxis=dict(title="Re", range=[-span, span], zeroline=False, dtick=2),
+            yaxis=dict(title="Im", range=[-span, span], zeroline=False, scaleanchor="x", scaleratio=1, dtick=2),
             width=1000,
             height=1000,
+            # Keep legend-driven visibility toggles (e.g. hiding "constant Re(s)"
+            # / "constant Im(s)") in place across slider-driven frame redraws.
+            uirevision="zeta",
             sliders=[dict(
                 active=0,
                 currentvalue={"prefix": "t = "},
