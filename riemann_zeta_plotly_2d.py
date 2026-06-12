@@ -131,6 +131,29 @@ def circle_family(center, radii, n_points=200):
     return np.concatenate(x_parts), np.concatenate(y_parts)
 
 
+def sine_wave_family(amplitudes, t, axis="re", center=0.0, frequency=1.0, phase=0.0):
+    """s-plane (x, y) coordinates for a family of sine curves, one per
+    amplitude in `amplitudes`, sampled over parameter `t`, NaN-separated.
+
+    `axis` selects which s-plane axis runs along `t`:
+    - "re": x = t, y = center + amplitude * sin(frequency * t + phase)
+        (waves run horizontally, oscillating in Im(s) around `center`).
+    - "im": y = t, x = center + amplitude * sin(frequency * t + phase)
+        (waves run vertically, oscillating in Re(s) around `center`).
+    """
+    nan = np.array([np.nan])
+    x_parts, y_parts = [], []
+    for a in amplitudes:
+        wave = center + a * np.sin(frequency * t + phase)
+        if axis == "re":
+            x_parts += [t, nan]
+            y_parts += [wave, nan]
+        else:
+            x_parts += [wave, nan]
+            y_parts += [t, nan]
+    return np.concatenate(x_parts), np.concatenate(y_parts)
+
+
 def build_zero_markers(im_extent=3.0):
     """Identity (on the critical line) and image (at the origin, since zeta = 0
     there) coordinates for the known nontrivial zeros within +/- im_extent."""
@@ -152,12 +175,19 @@ CIRCLES_RE0 = "circles_re0"
 CIRCLES_RE_HALF = "circles_re_half"
 CIRCLES_RE1 = "circles_re1"
 CRITICAL_LINE = "critical_line"
+SINE_WAVES = "sine_waves"
+SINE_WAVES_CRITICAL = "sine_waves_critical"
 
-ALL_CURVES = [RE_LINES, IM_LINES, CIRCLES_RE0, CIRCLES_RE_HALF, CIRCLES_RE1, CRITICAL_LINE]
+ALL_CURVES = [
+    RE_LINES, IM_LINES, CIRCLES_RE0, CIRCLES_RE_HALF, CIRCLES_RE1, CRITICAL_LINE,
+    SINE_WAVES, SINE_WAVES_CRITICAL,
+]
 
 
 def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_frames=30,
-                 n_circles=30, circle_n_points=200, h_re_extent=None, selected=None):
+                 n_circles=30, circle_n_points=200, h_re_extent=None, selected=None,
+                 sine_amplitudes=None, sine_x_extent=10.0, sine_n_points=400, sine_frequency=1.0,
+                 sine_critical_amplitudes=None, sine_critical_frequency=2 * np.pi, sine_critical_phase=0.0):
     """Build the figure. `selected` is a list of curve-library keys (see
     ALL_CURVES) choosing which transforming curve families to include as
     toggleable traces; defaults to all of them."""
@@ -166,11 +196,16 @@ def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_fra
         h_re_extent = im_extent
     if selected is None:
         selected = ALL_CURVES
+    if sine_amplitudes is None:
+        sine_amplitudes = np.arange(0.5, 5.5, 0.5)  # 10 waves, amplitudes 0.5, 1.0, ..., 5.0
+    if sine_critical_amplitudes is None:
+        sine_critical_amplitudes = np.arange(0.1, 0.6, 0.1)  # 5 waves, 0.1 .. 0.5 (0.5 reaches strip edges)
 
     re_coords = np.linspace(-re_extent, re_extent, n_lines)
     im_coords = np.linspace(-im_extent, im_extent, n_lines)
     im_fine = _im_sample_points(im_extent)
     h_re_fine = _im_sample_points(h_re_extent)
+    sine_x_fine = np.linspace(-sine_x_extent, sine_x_extent, sine_n_points)
 
     s0X0, s0Y0, s0X1, s0Y1 = build_strip_boundary(0.0, 0.5, im_extent, threshold=threshold)
     s1X0, s1Y0, s1X1, s1Y1 = build_strip_boundary(0.5, 1.0, im_extent, threshold=threshold)
@@ -212,6 +247,17 @@ def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_fra
             name="Re(s) = 1/2 (critical line)", color="black", width=2.5, dash="dot",
             xy=line_family("re", [0.5], im_fine),
         ),
+        SINE_WAVES: dict(
+            name="sine waves (varying amplitude)", color="teal", width=1,
+            xy=sine_wave_family(sine_amplitudes, sine_x_fine, frequency=sine_frequency),
+        ),
+        SINE_WAVES_CRITICAL: dict(
+            name="sine waves through critical strip", color="slateblue", width=1,
+            xy=sine_wave_family(
+                sine_critical_amplitudes, im_fine, axis="im", center=0.5,
+                frequency=sine_critical_frequency, phase=sine_critical_phase,
+            ),
+        ),
     }
 
     def lerp(a, b, t):
@@ -227,8 +273,8 @@ def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_fra
         x1, y1 = transform_line(x0, y0, threshold)
         curves.append((spec, x0, y0, x1, y1))
 
-    def traces(t):
-        result = [
+    def shading_traces(t):
+        return [
             go.Scatter(
                 x=lerp(s0X0, s0X1, t), y=lerp(s0Y0, s0Y1, t),
                 mode="lines", line=dict(width=0),
@@ -244,6 +290,9 @@ def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_fra
                 hoverinfo="skip",
             ),
         ]
+
+    def curve_traces(t, initial=False):
+        result = []
         for spec, x0, y0, x1, y1 in curves:
             line = dict(color=spec["color"], width=spec["width"])
             if "dash" in spec:
@@ -252,15 +301,27 @@ def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_fra
                 x=lerp(x0, x1, t), y=lerp(y0, y1, t),
                 mode="lines", line=line,
                 name=spec["name"],
+                # Start hidden (toggle on via the legend); only set on the
+                # initial trace, not on frames, so slider redraws don't undo
+                # a toggle the user has made (see uirevision below).
+                **({"visible": "legendonly"} if initial else {}),
             ))
-        result.append(go.Scatter(
+        return result
+
+    def zero_trace(t):
+        return go.Scatter(
             x=lerp(zX0, zX1, t), y=lerp(zY0, zY1, t),
             mode="markers", marker=dict(color="red", size=10, symbol="x", line=dict(width=2, color="red")),
             name="nontrivial zeros",
             text=zero_text, hoverinfo="text",
-        ))
-        return result
+        )
 
+    def traces(t, initial=False):
+        return shading_traces(t) + curve_traces(t, initial=initial) + [zero_trace(t)]
+
+    # Every frame carries full data for every trace, so any curve family
+    # toggled on via the legend gets the same smooth t-morph as the
+    # always-visible strip shading and zero markers.
     frames = []
     steps = []
     for i in range(n_frames):
@@ -279,7 +340,7 @@ def build_figure(re_extent=3.0, im_extent=45.0, n_lines=21, threshold=9.0, n_fra
         )
 
     fig = go.Figure(
-        data=traces(0),
+        data=traces(0, initial=True),
         frames=frames,
         layout=go.Layout(
             title="Riemann Zeta as a Map from C to C",
